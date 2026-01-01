@@ -28,6 +28,7 @@ class Reader(Client):
         lookupd_http_addresses: Sequence[str] | None = None,
         lookupd_poll_interval: float = 60000,
         lookupd_poll_jitter: float = 0.3,
+        max_in_flight: int = 1,
         connection_options: ConnectionOptions = ConnectionOptions(),
         loop: AbstractEventLoop | None = None,
     ):
@@ -44,6 +45,7 @@ class Reader(Client):
 
         self._topic = topic
         self._channel = channel
+        self._max_in_flight = max_in_flight
         self._loop = loop or asyncio.get_event_loop()
         self._lookupd: Lookupd | None = None
 
@@ -124,7 +126,7 @@ class Reader(Client):
         Currently, it equals to number of current connections where every connection
         has RDY=1.
         """
-        return len(self._connections)
+        return self._max_in_flight
 
     async def set_max_in_flight(self, count: int) -> None:
         """Update 'max_in_flight' number.
@@ -139,7 +141,11 @@ class Reader(Client):
         """Connect, identify and subscribe to nsqd by given host and port."""
         connection = await super().connect_to_nsqd(host=host, port=port)
         if not connection.is_subscribed:
-            await connection.subscribe(topic=self._topic, channel=self._channel)
+            await connection.subscribe(
+                topic=self._topic,
+                channel=self._channel,
+                messages_count=self._max_in_flight,
+            )
         return connection
 
     @property
@@ -317,6 +323,7 @@ async def create_reader(
     lookupd_http_addresses: Sequence[str] | None = None,
     lookupd_poll_interval: float = 60000,
     lookupd_poll_jitter: float = 0.3,
+    max_in_flight: int = 1,
     connection_options: ConnectionOptions = ConnectionOptions(),
 ) -> Reader:
     """Return created and connected reader."""
@@ -327,6 +334,7 @@ async def create_reader(
         lookupd_http_addresses=lookupd_http_addresses,
         lookupd_poll_interval=lookupd_poll_interval,
         lookupd_poll_jitter=lookupd_poll_jitter,
+        max_in_flight=max_in_flight,
         connection_options=connection_options,
     )
     await reader.connect()
