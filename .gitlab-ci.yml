@@ -1,0 +1,38 @@
+stages:
+  - test
+  - publish
+
+default:
+  image: python:3.11
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  NSQ_VERSION: "nsq-1.2.1.linux-amd64.go1.16.6"
+
+cache:
+  paths:
+    - .cache/pip
+
+.install_nsq: &install_nsq
+  - curl -sSL "http://bitly-downloads.s3.amazonaws.com/nsq/${NSQ_VERSION}.tar.gz" | tar -xzv --strip-components=1
+  - cp ./bin/nsqd /usr/local/bin/nsqd
+  - cp ./bin/nsqlookupd /usr/local/bin/nsqlookupd
+  - chmod +x /usr/local/bin/nsqd /usr/local/bin/nsqlookupd
+  - nsqd --version
+
+test:
+  stage: test
+  script:
+    - *install_nsq
+    - pip install tox
+    - tox -e py311-cov
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+
+publish:
+  stage: publish
+  script:
+    - pip install build twine
+    - python -m build
+    - TWINE_PASSWORD=${CI_JOB_TOKEN} TWINE_USERNAME=gitlab-ci-token python -m twine upload --repository-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi dist/*
+  only:
+    - tags
