@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Build wheel and source distributions in GitHub Actions.
+
 ## 0.4.0
 
 Transport-level consumer features. See `docs/INTEGRATION.md` for usage.
