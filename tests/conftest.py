@@ -7,13 +7,31 @@ import inspect
 import os
 import shutil
 import signal
+import socket
 import time
 from asyncio.subprocess import Process
-from typing import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
 import pytest
 
 from ansq.http import NSQDHTTPWriter, NsqLookupd
+
+
+def _get_free_port(host: str = "127.0.0.1") -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        sock.listen(1)
+        return int(sock.getsockname()[1])
+
+
+@pytest.fixture
+def event_loop():
+    """Compatibility fixture for pytest-asyncio >= 1.x."""
+    loop = asyncio.new_event_loop()
+    try:
+        yield loop
+    finally:
+        loop.close()
 
 
 class BaseNSQServer(abc.ABC):
@@ -78,7 +96,9 @@ class BaseNSQServer(abc.ABC):
         if self._process is None:
             return
 
-        os.kill(self._process.pid, signal.SIGKILL)
+        if self._process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(self._process.pid, signal.SIGKILL)
         await self._process.wait()
         self._process = None
 
@@ -159,11 +179,13 @@ def create_nsqd(tmp_path):
     @contextlib.asynccontextmanager
     async def _create_nsqd(
         host="127.0.0.1",
-        port=4150,
-        http_port=4151,
+        port=None,
+        http_port=None,
         lookupd_tcp_addresses=None,
         broadcast_address="127.0.0.1",
     ):
+        port = _get_free_port(host) if port is None else port
+        http_port = _get_free_port(host) if http_port is None else http_port
         data_path = tmp_path / f"{host}:{port}"
         data_path.mkdir(parents=True)
 
@@ -187,7 +209,9 @@ def create_nsqd(tmp_path):
 @pytest.fixture
 def create_nsqlookupd():
     @contextlib.asynccontextmanager
-    async def _create_nsqlookupd(host="127.0.0.1", port=4160, http_port=4161):
+    async def _create_nsqlookupd(host="127.0.0.1", port=None, http_port=None):
+        port = _get_free_port(host) if port is None else port
+        http_port = _get_free_port(host) if http_port is None else http_port
         nsqlookupd = NSQLookupD(host=host, port=port, http_port=http_port)
         try:
             await nsqlookupd.start()

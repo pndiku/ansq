@@ -11,7 +11,7 @@ from ansq.tcp.exceptions import ConnectionClosedError
 
 
 async def test_command_pub(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     response = await nsq.pub("test_topic", f"test_message1, timestamp={time()}")
@@ -22,7 +22,7 @@ async def test_command_pub(nsqd):
 
 
 async def test_command_pub_after_reconnect(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     response = await nsq.pub("test_topic", f"test_message1, timestamp={time()}")
@@ -39,7 +39,7 @@ async def test_command_pub_after_reconnect(nsqd):
 
 
 async def test_command_mpub(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     messages = ["message" for _ in range(10)]
@@ -52,7 +52,7 @@ async def test_command_mpub(nsqd):
 
 
 async def test_command_without_identity(nsqd):
-    nsq = NSQConnection()
+    nsq = NSQConnection(nsqd.host, nsqd.port)
     await nsq.connect()
     assert nsq.status.is_connected
 
@@ -64,7 +64,7 @@ async def test_command_without_identity(nsqd):
 
 
 async def test_command_without_connection(nsqd):
-    nsq = NSQConnection()
+    nsq = NSQConnection(nsqd.host, nsqd.port)
     assert nsq.status.is_init
 
     with pytest.raises(
@@ -77,7 +77,7 @@ async def test_command_without_connection(nsqd):
 
 
 async def test_command_sub(nsqd):
-    nsq = NSQConnection()
+    nsq = NSQConnection(nsqd.host, nsqd.port)
     await nsq.connect()
     assert nsq.status.is_connected
 
@@ -89,7 +89,7 @@ async def test_command_sub(nsqd):
 
 
 async def test_command_with_closed_connection(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     await nsq.close()
 
     with pytest.raises(ConnectionClosedError, match="^Connection is closed$"):
@@ -97,7 +97,7 @@ async def test_command_with_closed_connection(nsqd):
 
 
 async def test_command_with_concurrently_closed_connection(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
 
     async def close():
         await nsq.close()

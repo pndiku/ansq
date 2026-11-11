@@ -7,7 +7,7 @@ from ansq.http.writer import NSQDHTTPWriter
 
 @pytest.fixture
 async def writer(event_loop, nsqd):
-    http_writer = NSQDHTTPWriter(loop=event_loop)
+    http_writer = NSQDHTTPWriter(host=nsqd.host, port=nsqd.http_port, loop=event_loop)
     yield http_writer
     await http_writer.close()
 
@@ -17,10 +17,10 @@ async def test_ping(writer):
     assert res == "OK"
 
 
-async def test_info(writer):
+async def test_info(writer, nsqd):
     res = await writer.info()
-    assert res["tcp_port"] == 4150
-    assert res["http_port"] == 4151
+    assert res["tcp_port"] == nsqd.port
+    assert res["http_port"] == nsqd.http_port
 
 
 async def test_pub(writer):

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from functools import singledispatch
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
+
+T = TypeVar("T")
 
 
 class JSONEncoder(json.JSONEncoder):
@@ -172,6 +176,52 @@ def get_logger(debug: bool = False, unique_name: str | None = None) -> logging.L
     logging.basicConfig(format=log_format)
     logger.setLevel(logging.DEBUG if debug else logging.INFO)
     return logger
+
+
+async def retry_async(
+    fn: Callable[[], Awaitable[T]],
+    *,
+    attempts: int = 1,
+    initial_delay: float = 1.0,
+    max_delay: float = 10.0,
+    retry_exceptions: tuple[type[BaseException], ...] = (
+        OSError,
+        ConnectionError,
+        asyncio.TimeoutError,
+    ),
+    logger: logging.Logger | None = None,
+) -> T:
+    """Call ``fn`` and retry with exponential backoff on ``retry_exceptions``.
+
+    :param attempts: Total number of attempts (``1`` = no retry, current
+        behavior). Must be >= 1.
+    :param initial_delay: Delay in seconds before the first retry.
+    :param max_delay: Upper bound for the exponential backoff delay.
+    :raises: The last raised exception once ``attempts`` is exhausted.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
+
+    delay = initial_delay
+    for attempt in range(1, attempts + 1):
+        try:
+            return await fn()
+        except retry_exceptions as exc:
+            if attempt >= attempts:
+                raise
+            if logger is not None:
+                logger.warning(
+                    "Attempt %d/%d failed: %s. Retrying in %.1fs...",
+                    attempt,
+                    attempts,
+                    exc,
+                    delay,
+                )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, max_delay)
+
+    # Unreachable: the loop above always returns or raises.
+    raise AssertionError("retry_async: exhausted attempts without return or raise")
 
 
 def truncate(data: bytes, limit: int = 256) -> bytes:

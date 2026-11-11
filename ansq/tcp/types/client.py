@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+import asyncio
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import attr
+
+from ansq.utils import retry_async
 
 from .connection import ConnectionOptions
 
@@ -43,6 +47,32 @@ class Client:
         for connection in self.connections:
             await connection.close()
 
+    async def drain(self, timeout: float | None = None) -> bool:
+        """Gracefully drain and close all connections.
+
+        :returns: ``True`` if every connection fully drained before
+            ``timeout``; ``False`` otherwise.
+        """
+        connections = self.connections
+        if not connections:
+            return True
+
+        results = await asyncio.gather(
+            *(connection.drain(timeout) for connection in connections),
+            return_exceptions=True,
+        )
+
+        all_drained = True
+        for connection, result in zip(connections, results):
+            if isinstance(result, BaseException):
+                connection.logger.exception(
+                    "drain() failed for %s", connection.endpoint, exc_info=result
+                )
+                all_drained = False
+            elif not result:
+                all_drained = False
+        return all_drained
+
     async def connect_to_nsqd(self, host: str, port: int) -> NSQConnection:
         """Connect and identify to nsqd by given host and port."""
         from ansq.tcp.connection import NSQConnection
@@ -55,8 +85,17 @@ class Client:
         if existing_connection is not None:
             return existing_connection
 
-        await connection.connect()
-        await connection.identify()
+        async def _connect_and_identify() -> None:
+            await connection.connect()
+            await connection.identify()
+
+        await retry_async(
+            _connect_and_identify,
+            attempts=self.connection_options.connect_attempts,
+            initial_delay=self.connection_options.connect_retry_initial_delay,
+            max_delay=self.connection_options.connect_retry_max_delay,
+            logger=connection.logger,
+        )
 
         self.add_connection(connection)
         return connection

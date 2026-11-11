@@ -4,7 +4,7 @@
 [![Coverage](https://codecov.io/gh/list-family/ansq/branch/master/graph/badge.svg)](https://codecov.io/gh/list-family/ansq)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/ansq)
 
-Written with native Asyncio NSQ package
+Written with native Asyncio NSQ package. Requires Python 3.12 or newer.
 
 ## Installation
 
@@ -27,7 +27,7 @@ python -m pip install ansq
 - [x] SUB
 - [x] PUB
 - [x] Discovery
-- [ ] Backoff
+- [x] Consumer backoff
 - [ ] TLS
 - [ ] Deflate
 - [ ] Snappy
@@ -62,6 +62,20 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+For bounded concurrent handlers with automatic acknowledgement and requeueing, use `ansq.Consumer`:
+
+```python
+async def handle(message):
+    print(message.body)
+
+consumer = ansq.Consumer(reader, handle, concurrency=4)
+await consumer.run()
+# For graceful shutdown, call await reader.drain(timeout=30).
+```
+
+`Consumer` also supports retry limits, optional auto-touch, backoff and metrics.
+`ConnectionOptions` supports initial connection retries.
 
 ### Producer
 

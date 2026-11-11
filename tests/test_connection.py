@@ -9,7 +9,7 @@ from ansq.tcp.types import NSQCommands, TCPConnection
 
 
 async def test_connection(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     await nsq.close()
@@ -17,7 +17,7 @@ async def test_connection(nsqd):
 
 
 async def test_reconnect_after_close(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     await nsq.close()
@@ -31,7 +31,7 @@ async def test_reconnect_after_close(nsqd):
 
 
 async def test_reconnect_while_connected(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     assert await nsq.reconnect()
@@ -43,7 +43,7 @@ async def test_reconnect_while_connected(nsqd):
 
 async def test_auto_reconnect(nsqd, wait_for):
     nsq = await open_connection(
-        connection_options=ConnectionOptions(auto_reconnect=True)
+        nsqd.host, nsqd.port, connection_options=ConnectionOptions(auto_reconnect=True)
     )
     assert nsq.status.is_connected
 
@@ -59,22 +59,24 @@ async def test_auto_reconnect(nsqd, wait_for):
 
 async def test_invalid_feature(create_nsqd, wait_for, nsqd):
     nsq = await open_connection(
+        nsqd.host,
+        nsqd.port,
         connection_options=ConnectionOptions(
             # Default max heartbeat is 60s
             features=ConnectionFeatures(heartbeat_interval=60001)
-        )
+        ),
     )
     assert nsq.status.is_closed
 
 
 async def test_connection_options_as_kwargs(nsqd):
-    nsq = await open_connection(debug=True)
+    nsq = await open_connection(nsqd.host, nsqd.port, debug=True)
     assert nsq._options.debug is True
     await nsq.close()
 
 
 async def test_feature_options_as_kwargs(nsqd):
-    nsq = await open_connection(heartbeat_interval=30001)
+    nsq = await open_connection(nsqd.host, nsqd.port, heartbeat_interval=30001)
     assert nsq._options.features.heartbeat_interval == 30001
     await nsq.close()
 
@@ -83,14 +85,14 @@ async def test_invalid_kwarg(nsqd):
     with pytest.raises(
         TypeError, match="got an unexpected keyword argument: 'invalid_kwarg'"
     ):
-        await open_connection(invalid_kwarg=1)
+        await open_connection(nsqd.host, nsqd.port, invalid_kwarg=1)
 
 
 @pytest.mark.parametrize(
     "cmd", (NSQCommands.RDY, NSQCommands.FIN, NSQCommands.TOUCH, NSQCommands.REQ)
 )
 async def test_errors_from_commands_without_responses(nsqd, wait_for, cmd, caplog):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
 
     response = await nsq.execute(cmd)
     await wait_for(lambda: caplog.messages)
@@ -111,6 +113,8 @@ async def test_on_heartbeat(nsqd):
         assert conn.is_connected
 
     nsq = await open_connection(
+        nsqd.host,
+        nsqd.port,
         connection_options=ConnectionOptions(
             on_heartbeat=inc_heartbeats_count,
             features=ConnectionFeatures(heartbeat_interval=1000),

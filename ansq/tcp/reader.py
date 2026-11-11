@@ -4,7 +4,8 @@ import asyncio
 import contextlib
 import random
 from asyncio import AbstractEventLoop
-from typing import TYPE_CHECKING, Any, AsyncIterator, NamedTuple, NoReturn, Sequence
+from collections.abc import AsyncIterator, Sequence
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
 import attr
 
@@ -13,6 +14,7 @@ from ansq.tcp.types import Client, ConnectionOptions
 from ansq.utils import get_logger
 
 if TYPE_CHECKING:
+    from ansq.consumer import Consumer
     from ansq.tcp.connection import NSQConnection
     from ansq.tcp.types import NSQMessage, TCPConnection
 
@@ -41,13 +43,26 @@ class Reader(Client):
         )
 
         if not any((self._nsqd_tcp_addresses, lookupd_http_addresses)):
-            self._nsqd_tcp_addresses = ["localhost:4150"]
+            self._nsqd_tcp_addresses = ["127.0.0.1:4150"]
 
         self._topic = topic
         self._channel = channel
         self._max_in_flight = max_in_flight
         self._loop = loop or asyncio.get_event_loop()
         self._lookupd: Lookupd | None = None
+        self._logger = get_logger(connection_options.debug, "reader")
+
+        # RDY distribution state (see `set_max_in_flight`/`_redistribute_rdy`).
+        # Distribution is opt-in: disabled until `set_max_in_flight` is first
+        # called, so readers that never call it keep 0.3.x behavior (every
+        # connection independently gets RDY=max_in_flight).
+        self._rdy_distribution_enabled = False
+        self._rdy_lock = asyncio.Lock()
+        self._is_draining = False
+        self._background_tasks: set[asyncio.Task] = set()
+
+        # Set by `Consumer`/`consume()` so `drain()` can stop it first.
+        self._consumer: Consumer | None = None
 
         # Common message queue for all connections
         self._message_queue: asyncio.Queue[NSQMessage | None] = asyncio.Queue()
@@ -123,30 +138,119 @@ class Reader(Client):
     def max_in_flight(self) -> int:
         """Return 'max_in_flight' number.
 
-        Currently, it equals to number of current connections where every connection
-        has RDY=1.
+        Before `set_max_in_flight` is ever called, each connection
+        independently subscribes with RDY=`max_in_flight` (0.3.x behavior).
+        After `set_max_in_flight` is called, this becomes the *total* RDY
+        budget distributed across all current connections.
         """
         return self._max_in_flight
 
     async def set_max_in_flight(self, count: int) -> None:
-        """Update 'max_in_flight' number.
+        """Update 'max_in_flight' number and redistribute RDY across connections.
 
-        The max_in_flight is the number of messages the reader can receive before
-        nsqd expects a response. It effects how RDY state is managed. For more detail
-        see the doc: https://nsq.io/clients/building_client_libraries.html#rdy-state
+        The max_in_flight is the total number of messages the reader can
+        receive before nsqd expects a response, distributed across all
+        current connections (go-nsq-style: as evenly as possible, with any
+        remainder going to the earliest connections; connections beyond
+        ``count`` get RDY 0 if there are more connections than budget). For
+        more detail see the doc:
+        https://nsq.io/clients/building_client_libraries.html#rdy-state
+
+        Calling this method opts the reader into RDY-distribution mode: until
+        it is called, each connection independently subscribes with RDY
+        equal to the reader's `max_in_flight` (unchanged 0.3.x behavior, so
+        existing consumers are unaffected).
         """
-        raise NotImplementedError("Update max_in_flight not implemented yet")
+        self._max_in_flight = count
+        self._rdy_distribution_enabled = True
+        await self._redistribute_rdy()
+
+    @staticmethod
+    def _compute_rdy_distribution(
+        total: int, connection_ids: Sequence[str]
+    ) -> dict[str, int]:
+        """Pure helper: split `total` RDY budget across `connection_ids`.
+
+        Connections are consumed in the given order, so callers should pass
+        them in a deterministic order (e.g. sorted by connection id).
+        """
+        k = len(connection_ids)
+        if k == 0 or total <= 0:
+            return {conn_id: 0 for conn_id in connection_ids}
+
+        if total >= k:
+            base, remainder = divmod(total, k)
+            return {
+                conn_id: base + (1 if i < remainder else 0)
+                for i, conn_id in enumerate(connection_ids)
+            }
+
+        # total < k: only the first `total` connections get RDY 1.
+        return {
+            conn_id: 1 if i < total else 0 for i, conn_id in enumerate(connection_ids)
+        }
+
+    async def _redistribute_rdy(self) -> None:
+        """Recompute and send the RDY distribution to all connections.
+
+        No-op while draining, so a connection add/remove event during
+        shutdown can't reopen the RDY window.
+        """
+        async with self._rdy_lock:
+            if self._is_draining:
+                return
+
+            connections = sorted(self.connections, key=lambda conn: conn.id)
+            distribution = self._compute_rdy_distribution(
+                self._max_in_flight, [conn.id for conn in connections]
+            )
+            for connection in connections:
+                if not (connection.is_connected and connection.is_subscribed):
+                    continue
+                share = distribution[connection.id]
+                if share != connection.rdy_messages_count:
+                    await connection.rdy(share)
+
+    def _schedule_redistribute_rdy(self) -> None:
+        """Fire-and-forget `_redistribute_rdy()`, e.g. from a sync callback."""
+        task = self._loop.create_task(self._redistribute_rdy())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_redistribute_task_done)
+
+    def _on_redistribute_task_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._logger.exception("RDY redistribution failed", exc_info=exc)
 
     async def connect_to_nsqd(self, host: str, port: int) -> NSQConnection:
         """Connect, identify and subscribe to nsqd by given host and port."""
         connection = await super().connect_to_nsqd(host=host, port=port)
         if not connection.is_subscribed:
-            await connection.subscribe(
-                topic=self._topic,
-                channel=self._channel,
-                messages_count=self._max_in_flight,
-            )
+            if self._rdy_distribution_enabled:
+                await connection.subscribe(
+                    topic=self._topic,
+                    channel=self._channel,
+                    messages_count=0,
+                )
+                await self._redistribute_rdy()
+            else:
+                # 0.3.x behavior: each connection independently gets the
+                # full `max_in_flight` RDY budget.
+                await connection.subscribe(
+                    topic=self._topic,
+                    channel=self._channel,
+                    messages_count=self._max_in_flight,
+                )
         return connection
+
+    def remove_connection(self, connection: TCPConnection) -> None:
+        """Remove connection from the pool and redistribute remaining RDY."""
+        super().remove_connection(connection)
+        if self._rdy_distribution_enabled:
+            self._schedule_redistribute_rdy()
 
     @property
     def _is_auto_reconnect_enabled(self) -> bool:
@@ -158,6 +262,42 @@ class Reader(Client):
             await self._lookupd.close()
 
         await super().close()
+
+    async def drain(self, timeout: float | None = None) -> bool:
+        """Gracefully stop consuming, drain in-flight messages, and close.
+
+        Stops the attached `Consumer` (if any) first, then stops lookupd
+        polling (so it can't re-add connections mid-drain), then drains and
+        closes every connection.
+        """
+        self._is_draining = True
+
+        if self._consumer is not None:
+            await self._consumer.stop()
+
+        if self._lookupd is not None:
+            await self._lookupd.stop_polling()
+
+        return await super().drain(timeout)
+
+    async def consume(
+        self,
+        handler: Any,
+        *,
+        concurrency: int = 1,
+        **consumer_kwargs: Any,
+    ) -> None:
+        """Build a `Consumer` bound to this reader and run it until stopped.
+
+        The consumer is stored on the reader so `drain()` (e.g. from a
+        service's SIGTERM handler) stops it before draining connections.
+        """
+        from ansq.consumer import Consumer
+
+        self._consumer = Consumer(
+            self, handler, concurrency=concurrency, **consumer_kwargs
+        )
+        await self._consumer.run()
 
 
 class Lookupd:

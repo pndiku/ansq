@@ -9,8 +9,9 @@ import warnings
 from asyncio.events import AbstractEventLoop
 from asyncio.streams import StreamReader, StreamWriter
 from collections import deque
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Deque, Mapping
+from typing import TYPE_CHECKING, Any, Deque
 
 import attr
 
@@ -20,11 +21,16 @@ if TYPE_CHECKING:
     from ansq.tcp.types import ConnectionStatus, NSQMessage, NSQMessageSchema
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _get_version() -> str:
     from importlib import metadata
 
-    return metadata.version("ansq")
+    for distribution_name in ("efashe-ansq", "ansq"):
+        try:
+            return metadata.version(distribution_name)
+        except metadata.PackageNotFoundError:
+            continue
+    return "unknown"
 
 
 def _get_hostname() -> str:
@@ -63,11 +69,17 @@ class ConnectionOptions:
     on_exception: Callable | None = None
     on_close: Callable[[TCPConnection], None] | None = None
     on_heartbeat: Callable[[TCPConnection], Awaitable[None]] | None = None
+    on_status_change: Callable[[TCPConnection, ConnectionStatus], None] | None = None
     loop: AbstractEventLoop | None = None
     auto_reconnect: bool = True
     features: ConnectionFeatures = ConnectionFeatures()
     debug: bool = False
     logger: logging.Logger | None = None
+    # Initial-connect retry (does not affect auto-reconnect, which already
+    # has its own backoff in NSQConnection._do_auto_reconnect).
+    connect_attempts: int = 1
+    connect_retry_initial_delay: float = 1.0
+    connect_retry_max_delay: float = 10.0
 
     def _evolve(self, **kwargs: Any) -> ConnectionOptions:
         option_names = set(attr.fields_dict(type(self)))
@@ -80,13 +92,10 @@ class ConnectionOptions:
         for param, value in kwargs.items():
             if param in option_names:
                 options[param] = value
-                break
-
-            if param in feature_names:
+            elif param in feature_names:
                 features[param] = value
-                break
-
-            raise TypeError(f"got an unexpected keyword argument: '{param}'")
+            else:
+                raise TypeError(f"got an unexpected keyword argument: '{param}'")
 
         connection_features = attr.evolve(self.features, **features)
         return attr.evolve(self, features=connection_features, **options)
@@ -160,6 +169,10 @@ class TCPConnection(abc.ABC):
         self._on_exception = self._options.on_exception
         self._on_close = self._options.on_close
         self._on_heartbeat = self._options.on_heartbeat
+        self._on_status_change = self._options.on_status_change
+
+        # Graceful drain state (see `drain()`)
+        self._is_draining = False
 
         # Reader setup
         self._topic: str | None = None
@@ -181,6 +194,22 @@ class TCPConnection(abc.ABC):
     @property
     def status(self) -> ConnectionStatus:
         return self._status
+
+    def _set_status(self, new_status: ConnectionStatus) -> None:
+        """Set connection status and notify `on_status_change`, if set."""
+        self._status = new_status
+        if self._on_status_change is not None:
+            try:
+                self._on_status_change(self, new_status)
+            except Exception:
+                self.logger.exception(
+                    "on_status_change callback raised for %s", self.endpoint
+                )
+
+    @property
+    def is_draining(self) -> bool:
+        """True while a graceful `drain()` is in progress."""
+        return self._is_draining
 
     @property
     def endpoint(self) -> str:

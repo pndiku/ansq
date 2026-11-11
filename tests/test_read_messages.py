@@ -11,7 +11,7 @@ from ansq.tcp.types import NSQMessage
 
 
 async def test_read_message(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     timestamp = time()
@@ -34,7 +34,7 @@ async def test_read_message(nsqd):
 
 
 async def test_read_message_and_req(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     timestamp = time()
@@ -64,7 +64,7 @@ async def test_read_message_and_req(nsqd):
     ),
 )
 async def test_read_and_process_twice_message(nsqd, process):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     response = await nsq.pub("topic", "foo")
@@ -97,9 +97,11 @@ async def test_read_and_process_twice_message(nsqd, process):
 )
 async def test_read_and_process_timed_out_message(nsqd, process):
     nsq = await open_connection(
+        nsqd.host,
+        nsqd.port,
         connection_options=ConnectionOptions(
             features=ConnectionFeatures(msg_timeout=1000)
-        )
+        ),
     )
     assert nsq.status.is_connected
 
@@ -122,7 +124,7 @@ async def test_read_and_process_timed_out_message(nsqd, process):
 
 
 async def test_read_messages_via_generator(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     response = await nsq.pub("test_read_messages_via_generator", "test_message")
@@ -148,7 +150,7 @@ async def test_read_messages_via_generator(nsqd):
 
 
 async def test_read_single_message_via_get_message(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     response = await nsq.pub("test_read_single_message_via_get_message", "test_message")
@@ -175,7 +177,7 @@ async def test_read_single_message_via_get_message(nsqd):
 
 
 async def test_read_bytes_message(nsqd):
-    nsq = await open_connection()
+    nsq = await open_connection(nsqd.host, nsqd.port)
     assert nsq.status.is_connected
 
     response = await nsq.pub("test_read_bytes_message", b"\xa1")
@@ -201,9 +203,11 @@ async def test_read_bytes_message(nsqd):
 
 async def test_timeout_messages(nsqd, caplog):
     nsq = await open_connection(
+        nsqd.host,
+        nsqd.port,
         connection_options=ConnectionOptions(
             features=ConnectionFeatures(msg_timeout=1000),
-        )
+        ),
     )
     assert nsq.status.is_connected
 
@@ -249,9 +253,11 @@ async def test_timeout_messages(nsqd, caplog):
 
 async def test_read_message_and_touch(nsqd):
     nsq = await open_connection(
+        nsqd.host,
+        nsqd.port,
         connection_options=ConnectionOptions(
             features=ConnectionFeatures(msg_timeout=1000)
-        )
+        ),
     )
     assert nsq.status.is_connected
 

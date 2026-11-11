@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import warnings
+from collections.abc import AsyncGenerator, Callable, Mapping
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Callable, Mapping
+from typing import Any
 
 import attr
 
@@ -27,7 +29,7 @@ from ansq.tcp.types import (
 )
 from ansq.tcp.types import TCPConnection as NSQConnectionBase
 from ansq.typedefs import TCPResponse
-from ansq.utils import validate_topic_channel_name
+from ansq.utils import retry_async, validate_topic_channel_name
 
 # Auto reconnect settings
 AUTO_RECONNECT_INITIAL_INTERVAL = 2
@@ -43,7 +45,7 @@ class NSQConnection(NSQConnectionBase):
         )
 
         self._writer.write(NSQCommands.MAGIC_V2)
-        self._status = ConnectionStatus.CONNECTED
+        self._set_status(ConnectionStatus.CONNECTED)
         self.logger.debug(f"Connect to {self.endpoint} established")
 
         self._reader_task = self._loop.create_task(self._read_data_task())
@@ -66,7 +68,7 @@ class NSQConnection(NSQConnectionBase):
         :returns: Reconnect successful status.
         """
         self.logger.debug(f"Reconnecting to {self.endpoint}...")
-        self._status = ConnectionStatus.RECONNECTING
+        self._set_status(ConnectionStatus.RECONNECTING)
 
         await self._do_close(change_status=False, silent=True)
         try:
@@ -87,7 +89,7 @@ class NSQConnection(NSQConnectionBase):
             return False
 
         self.logger.debug(f"Reconnected to {self.endpoint}")
-        self._status = ConnectionStatus.CONNECTED
+        self._set_status(ConnectionStatus.CONNECTED)
         return True
 
     async def _do_auto_reconnect(
@@ -134,7 +136,7 @@ class NSQConnection(NSQConnectionBase):
             return
 
         if change_status:
-            self._status = ConnectionStatus.CLOSING
+            self._set_status(ConnectionStatus.CLOSING)
 
         if not silent:
             if error is not None:
@@ -193,7 +195,7 @@ class NSQConnection(NSQConnectionBase):
             if self._on_close is not None:
                 self._on_close(self)
 
-            self._status = ConnectionStatus.CLOSED
+            self._set_status(ConnectionStatus.CLOSED)
             self.logger.debug(f"Connection {self.endpoint} is closed")
 
     async def execute(
@@ -549,6 +551,49 @@ class NSQConnection(NSQConnectionBase):
     async def _cls(self) -> TCPResponse:
         return await self.execute(NSQCommands.CLS)
 
+    async def drain(self, timeout: float | None = None) -> bool:
+        """Gracefully stop receiving new messages and close the connection.
+
+        Sends ``RDY 0``, waits for in-flight messages to be acked (fin/req)
+        up to ``timeout`` seconds, sends ``CLS``, then closes. Auto-reconnect
+        is disabled for the duration of the drain: a reconnect resubscribes
+        with the stored ``rdy_messages_count`` and would reopen the RDY
+        window mid-drain otherwise.
+
+        :returns: ``True`` if fully drained (``in_flight`` reached 0) before
+            the deadline; ``False`` if the timeout elapsed with messages
+            still in flight. Those messages are not lost: they will be
+            redelivered to another consumer once ``msg_timeout`` elapses.
+        """
+        self._is_draining = True
+        self._auto_reconnect = False
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reconnect_task
+
+        if self.is_connected and self.is_subscribed:
+            with contextlib.suppress(ConnectionClosedError, OSError):
+                await self.rdy(0)
+
+        drained = True
+        if self._in_flight > 0:
+            deadline = self._loop.time() + timeout if timeout is not None else None
+            while self._in_flight > 0:
+                if deadline is not None and self._loop.time() >= deadline:
+                    drained = False
+                    break
+                await asyncio.sleep(0.05)
+
+        if self.is_connected:
+            try:
+                await self._cls()
+            except Exception:
+                self.logger.exception("CLS failed for %s during drain", self.endpoint)
+
+        await self._do_close()
+        return drained
+
     async def subscribe(
         self, topic: str, channel: str, messages_count: int = 1
     ) -> None:
@@ -594,7 +639,7 @@ class NSQConnection(NSQConnectionBase):
 
 
 async def open_connection(
-    host: str = "localhost",
+    host: str = "127.0.0.1",
     port: int = 4150,
     *,
     connection_options: ConnectionOptions = ConnectionOptions(),
@@ -610,6 +655,16 @@ async def open_connection(
         connection_options=connection_options,
         **kwargs,
     )
-    await nsq.connect()
-    await nsq.identify()
+
+    async def _connect_and_identify() -> None:
+        await nsq.connect()
+        await nsq.identify()
+
+    await retry_async(
+        _connect_and_identify,
+        attempts=nsq.options.connect_attempts,
+        initial_delay=nsq.options.connect_retry_initial_delay,
+        max_delay=nsq.options.connect_retry_max_delay,
+        logger=nsq.logger,
+    )
     return nsq

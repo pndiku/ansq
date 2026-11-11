@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import random
-from typing import TYPE_CHECKING, Any, Sequence
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 from ansq.tcp.connection import NSQConnection
+from ansq.tcp.exceptions import ConnectionClosedError
 from ansq.tcp.types import Client, ConnectionOptions
 
 if TYPE_CHECKING:
@@ -24,7 +26,7 @@ class Writer(Client):
         )
 
         if not self._nsqd_tcp_addresses:
-            self._nsqd_tcp_addresses = ["localhost:4150"]
+            self._nsqd_tcp_addresses = ["127.0.0.1:4150"]
 
     async def pub(self, topic: str, message: Any) -> TCPResponse:
         """Publish a message to a topic to a random connection."""
@@ -46,6 +48,8 @@ class Writer(Client):
         open_connections = tuple(
             conn for conn in self._connections.values() if conn.is_connected
         )
+        if not open_connections:
+            raise ConnectionClosedError("No open NSQ connections available for publish")
         return random.choice(open_connections)
 
 
