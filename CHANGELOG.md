@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2
+
+- Update GitHub Actions to Node 24-compatible releases.
+
 ## 0.4.1
 
 - Build wheel and source distributions in GitHub Actions.
